@@ -10,13 +10,13 @@ import (
 	"time"
 
 	"github.com/yatesdr/plcio/ads"
-	"warlink/config"
 	"github.com/yatesdr/plcio/driver"
 	"github.com/yatesdr/plcio/logging"
 	"github.com/yatesdr/plcio/logix"
 	"github.com/yatesdr/plcio/omron"
 	"github.com/yatesdr/plcio/pccc"
 	"github.com/yatesdr/plcio/s7"
+	"warlink/config"
 )
 
 // ConnectionStatus represents the state of a PLC connection.
@@ -58,17 +58,17 @@ const MaxConnectRetries = 5
 
 // ManagedPLC represents a PLC under management.
 type ManagedPLC struct {
-	Config     *config.PLCConfig
-	Driver     driver.Driver        // Unified driver interface
-	DeviceInfo *driver.DeviceInfo   // Unified device info
-	Programs   []string             // Program names (for Logix)
-	Tags       []driver.TagInfo     // Discovered tags (for discovery-capable PLCs)
-	ManualTags    []driver.TagInfo   // Tags from config (for non-discovery PLCs)
-	ManualTagGen  uint64             // Incremented when ManualTags are rebuilt
-	Values     map[string]*TagValue // Tag values from last poll
-	Status     ConnectionStatus
-	LastError  error
-	LastPoll   time.Time
+	Config       *config.PLCConfig
+	Driver       driver.Driver        // Unified driver interface
+	DeviceInfo   *driver.DeviceInfo   // Unified device info
+	Programs     []string             // Program names (for Logix)
+	Tags         []driver.TagInfo     // Discovered tags (for discovery-capable PLCs)
+	ManualTags   []driver.TagInfo     // Tags from config (for non-discovery PLCs)
+	ManualTagGen uint64               // Incremented when ManualTags are rebuilt
+	Values       map[string]*TagValue // Tag values from last poll
+	Status       ConnectionStatus
+	LastError    error
+	LastPoll     time.Time
 	ConnRetries  int  // Number of consecutive failed connection attempts
 	RetryLimited bool // True if retry limit reached, stops auto-reconnect
 	mu           sync.RWMutex
@@ -436,13 +436,13 @@ func (m *ManagedPLC) GetConnectionMode() string {
 // ValueChange represents a tag value that has changed.
 type ValueChange struct {
 	PLCName  string
-	TagName  string      // For S7: the address (e.g., "DB1.8"); for others: the tag name
-	Alias    string      // User-defined alias/name (especially useful for S7)
-	Address  string      // For S7: the address in uppercase; empty for other families
+	TagName  string // For S7: the address (e.g., "DB1.8"); for others: the tag name
+	Alias    string // User-defined alias/name (especially useful for S7)
+	Address  string // For S7: the address in uppercase; empty for other families
 	TypeName string
 	Value    interface{}
 	Writable bool
-	Family   string      // PLC family ("s7", "logix", "beckhoff", etc.)
+	Family   string // PLC family ("s7", "logix", "beckhoff", etc.)
 	// Service inhibit flags - when true, don't publish to that service
 	NoREST   bool
 	NoMQTT   bool
@@ -536,9 +536,9 @@ func (w *PLCWorker) poll() {
 	// Copy the tags to read while holding the lock to avoid race with UI
 	tagsToRead := make([]string, 0)
 	writableMap := make(map[string]bool)
-	aliasMap := make(map[string]string)      // Tag name -> alias
-	typeMap := make(map[string]string)       // Tag name -> configured data type
-	ignoreMap := make(map[string][]string)   // Tag name -> list of members to ignore for change detection
+	aliasMap := make(map[string]string)    // Tag name -> alias
+	typeMap := make(map[string]string)     // Tag name -> configured data type
+	ignoreMap := make(map[string][]string) // Tag name -> list of members to ignore for change detection
 	// Service inhibit maps
 	noRESTMap := make(map[string]bool)
 	noMQTTMap := make(map[string]bool)
@@ -633,6 +633,11 @@ func (w *PLCWorker) poll() {
 
 	// Read via Driver
 	driverValues, err := drv.Read(requests)
+	if err == nil {
+		if connErr := allDriverValuesConnectionError(driverValues, drv); connErr != nil {
+			err = connErr
+		}
+	}
 
 	// Convert driver values to TagValue and apply ignore lists
 	var values []*TagValue
@@ -806,6 +811,30 @@ func (w *PLCWorker) poll() {
 			w.resolveManualTagTypes()
 		}
 	}
+}
+
+func allDriverValuesConnectionError(values []*driver.TagValue, drv driver.Driver) error {
+	if drv == nil || len(values) == 0 {
+		return nil
+	}
+	var first error
+	var sawFailure bool
+	for _, v := range values {
+		if v == nil || v.Error == nil {
+			return nil
+		}
+		sawFailure = true
+		if !drv.IsConnectionError(v.Error) {
+			return nil
+		}
+		if first == nil {
+			first = v.Error
+		}
+	}
+	if !sawFailure {
+		return nil
+	}
+	return fmt.Errorf("all polled tags failed with connection errors: %w", first)
 }
 
 // resolveManualTagTypes discovers the correct type codes for manual tags that still
@@ -1194,7 +1223,7 @@ func (m *Manager) AddPLC(cfg *config.PLCConfig) error {
 
 // Polling rate limits
 const (
-	MinPollRate = 250 * time.Millisecond  // Minimum allowed poll rate
+	MinPollRate = 250 * time.Millisecond   // Minimum allowed poll rate
 	MaxPollRate = 10000 * time.Millisecond // Maximum allowed poll rate (10 seconds)
 )
 
@@ -1360,7 +1389,6 @@ func (m *Manager) connectPLC(plc *ManagedPLC) error {
 
 	return nil
 }
-
 
 // Connect establishes a connection to the named PLC.
 // This can be called from UI thread - runs connection in background.
