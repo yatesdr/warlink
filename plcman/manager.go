@@ -1227,6 +1227,24 @@ const (
 	MaxPollRate = 10000 * time.Millisecond // Maximum allowed poll rate (10 seconds)
 )
 
+// MinStaleThreshold is the floor for the watchdog's staleness check. A PLC that
+// reports StatusConnected but has had no successful poll within
+// max(3*pollRate, MinStaleThreshold) is treated as silently dead and forced to
+// reconnect. This is independent of read-error classification, so it recovers
+// from link drops that the poll loop fails to detect (e.g. the driver reports
+// per-tag errors with a nil top-level error, or a half-open socket).
+const MinStaleThreshold = 15 * time.Second
+
+// staleThreshold returns how long a connected PLC may go without a successful
+// poll before the watchdog forces a reconnect.
+func (m *Manager) staleThreshold(cfg *config.PLCConfig) time.Duration {
+	t := 3 * m.getEffectivePollRate(cfg)
+	if t < MinStaleThreshold {
+		t = MinStaleThreshold
+	}
+	return t
+}
+
 // getEffectivePollRate returns the poll rate for a PLC.
 // Uses the PLC's configured rate if set, otherwise falls back to the global rate.
 // Enforces minimum of 250ms to protect PLC from excessive polling.
@@ -1378,6 +1396,10 @@ func (m *Manager) connectPLC(plc *ManagedPLC) error {
 	plc.Status = StatusConnected
 	plc.ConnRetries = 0
 	plc.RetryLimited = false
+	// Seed LastPoll so the watchdog's staleness check grants a grace period
+	// before the first successful poll; staleness then means "no good read
+	// since we connected".
+	plc.LastPoll = time.Now()
 	name := plc.Config.Name
 	plc.mu.Unlock()
 
@@ -1724,16 +1746,40 @@ func (m *Manager) checkReconnections() {
 		status := plc.Status
 		enabled := plc.Config.Enabled
 		name := plc.Config.Name
+		lastPoll := plc.LastPoll
+		cfg := plc.Config
 		plc.mu.RUnlock()
 
-		// Only attempt reconnection if:
-		// - Auto-connect is enabled
-		// - PLC is disconnected or in error state (not connected or connecting)
+		// Only attempt reconnection if auto-connect is enabled.
 		if !enabled {
 			continue
 		}
-		if status == StatusConnected || status == StatusConnecting {
+
+		// A connect is genuinely in progress (and is timeout-bounded); leave it.
+		if status == StatusConnecting {
 			continue
+		}
+
+		// A PLC that reports connected is normally left alone, but verify it is
+		// actually alive: if no successful poll has landed within the staleness
+		// threshold, the link has silently dropped without the poll loop noticing.
+		// Force a reconnect in that case.
+		if status == StatusConnected {
+			threshold := m.staleThreshold(cfg)
+			if lastPoll.IsZero() || time.Since(lastPoll) <= threshold {
+				continue
+			}
+			logging.DebugLog("plcman", "WATCHDOG %s: connection stale (no successful poll for %v > %v), forcing reconnect",
+				name, time.Since(lastPoll).Round(time.Second), threshold)
+			m.log("[yellow]PLC %s connection stale, forcing reconnect[-]", name)
+			plc.mu.Lock()
+			plc.Status = StatusDisconnected
+			if plc.Driver != nil {
+				plc.Driver.Close()
+				plc.Driver = nil
+			}
+			plc.mu.Unlock()
+			m.markStatusDirty()
 		}
 
 		// Check if reconnection is already in progress for this PLC

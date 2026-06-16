@@ -3,8 +3,11 @@ package plcman
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/yatesdr/plcio/driver"
+
+	"warlink/config"
 )
 
 type stubDriver struct{}
@@ -46,5 +49,24 @@ func TestAllDriverValuesConnectionErrorMixedResults(t *testing.T) {
 	}, drv)
 	if err != nil {
 		t.Fatalf("expected nil for mixed success/failure results, got %v", err)
+	}
+}
+
+func TestStaleThreshold(t *testing.T) {
+	m := NewManager(time.Second)
+
+	// Fast poll rate: floor of MinStaleThreshold applies (3*250ms < 15s).
+	if got := m.staleThreshold(&config.PLCConfig{PollRate: 250 * time.Millisecond}); got != MinStaleThreshold {
+		t.Errorf("fast poll: expected floor %v, got %v", MinStaleThreshold, got)
+	}
+
+	// Slow poll rate: 3*pollRate dominates the floor.
+	if got := m.staleThreshold(&config.PLCConfig{PollRate: 10 * time.Second}); got != 30*time.Second {
+		t.Errorf("slow poll: expected 30s, got %v", got)
+	}
+
+	// Unset per-PLC rate falls back to the manager default (1s) -> floor.
+	if got := m.staleThreshold(&config.PLCConfig{}); got != MinStaleThreshold {
+		t.Errorf("default poll: expected floor %v, got %v", MinStaleThreshold, got)
 	}
 }
