@@ -2,7 +2,7 @@ module warlink
 
 go 1.24.0
 
-require github.com/yatesdr/plcio v0.1.6
+require github.com/yatesdr/plcio v0.2.9
 
 require (
 	github.com/eclipse/paho.mqtt.golang v1.5.1
