@@ -288,8 +288,8 @@ func (h *handlers) setupSSE() func() {
 			}
 
 			errMsg := ""
-			if plc.GetError() != nil {
-				errMsg = plc.GetError().Error()
+			if err := plc.GetError(); err != nil {
+				errMsg = err.Error()
 			}
 
 			var productName, serialNumber, vendor string
