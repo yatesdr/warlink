@@ -95,6 +95,9 @@ GET /{plc}/tags
 
 Returns all enabled tags with current values.
 
+`timestamp` is the time the cached value was last updated. It does not advance
+while PLC reads are failing, allowing clients to detect stale cached data.
+
 **Response:**
 ```json
 [

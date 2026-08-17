@@ -26,7 +26,8 @@ type PLCResponse struct {
 	Error       string `json:"error,omitempty"`
 }
 
-// TagResponse is the JSON response for a tag value.
+// TagResponse is the JSON response for a tag value. Timestamp identifies when
+// the cached value was last updated, not when the API response was generated.
 // When a tag has an alias, Name contains the alias and MemLoc contains the original address.
 type TagResponse struct {
 	PLC       string      `json:"plc"`
@@ -81,12 +82,12 @@ type AllTagEntry struct {
 
 // handlers holds the API handler functions.
 type handlers struct {
-	managers        engine.Managers
-	engine          *engine.Engine
-	hub             *eventHub
-	valueListenerID plcman.ListenerID
+	managers         engine.Managers
+	engine           *engine.Engine
+	hub              *eventHub
+	valueListenerID  plcman.ListenerID
 	changeListenerID plcman.ListenerID
-	packListenerID  tagpack.PublishListenerID
+	packListenerID   tagpack.PublishListenerID
 }
 
 // NewRouter creates the REST API router.
@@ -295,7 +296,8 @@ func (h *handlers) handleProgramTags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	values := plc.GetValues()
+	values, valuesUpdatedAt := plc.GetValuesSnapshot()
+	valueTimestamp := formatValueTimestamp(valuesUpdatedAt)
 	prefix := "Program:" + programName + "."
 
 	response := make(map[string]TagResponse)
@@ -325,6 +327,7 @@ func (h *handlers) handleProgramTags(w http.ResponseWriter, r *http.Request) {
 		if v, ok := values[sel.Name]; ok {
 			resp.Type = v.TypeName()
 			resp.Value = v.GoValue()
+			resp.Timestamp = valueTimestamp
 			if v.Error != nil {
 				resp.Error = v.Error.Error()
 			}
@@ -347,7 +350,8 @@ func (h *handlers) handleAllTags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	values := plc.GetValues()
+	values, valuesUpdatedAt := plc.GetValuesSnapshot()
+	valueTimestamp := formatValueTimestamp(valuesUpdatedAt)
 	response := make(map[string]TagResponse)
 
 	for _, sel := range plc.Config.Tags {
@@ -372,6 +376,7 @@ func (h *handlers) handleAllTags(w http.ResponseWriter, r *http.Request) {
 		if v, ok := values[sel.Name]; ok {
 			resp.Type = v.TypeName()
 			resp.Value = v.GoValue()
+			resp.Timestamp = valueTimestamp
 			if v.Error != nil {
 				resp.Error = v.Error.Error()
 			}
@@ -425,14 +430,15 @@ func (h *handlers) handleSingleTag(w http.ResponseWriter, r *http.Request) {
 		memloc = actualTagName
 	}
 
-	values := plc.GetValues()
+	values, valuesUpdatedAt := plc.GetValuesSnapshot()
 	if v, ok := values[actualTagName]; ok {
 		resp := TagResponse{
-			PLC:    plc.Config.Name,
-			Name:   name,
-			MemLoc: memloc,
-			Type:   v.TypeName(),
-			Value:  v.GoValue(),
+			PLC:       plc.Config.Name,
+			Name:      name,
+			MemLoc:    memloc,
+			Type:      v.TypeName(),
+			Value:     v.GoValue(),
+			Timestamp: formatValueTimestamp(valuesUpdatedAt),
 		}
 		if v.Error != nil {
 			resp.Error = v.Error.Error()
@@ -453,16 +459,24 @@ func (h *handlers) handleSingleTag(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := TagResponse{
-		PLC:    plc.Config.Name,
-		Name:   name,
-		MemLoc: memloc,
-		Type:   v.TypeName(),
-		Value:  v.GoValue(),
+		PLC:       plc.Config.Name,
+		Name:      name,
+		MemLoc:    memloc,
+		Type:      v.TypeName(),
+		Value:     v.GoValue(),
+		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	if v.Error != nil {
 		resp.Error = v.Error.Error()
 	}
 	h.writeJSON(w, resp)
+}
+
+func formatValueTimestamp(updatedAt time.Time) string {
+	if updatedAt.IsZero() {
+		return ""
+	}
+	return updatedAt.UTC().Format(time.RFC3339Nano)
 }
 
 func (h *handlers) handleWrite(w http.ResponseWriter, r *http.Request) {

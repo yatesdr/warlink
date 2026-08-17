@@ -53,25 +53,21 @@ type HealthStatus struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
-// MaxConnectRetries is the maximum number of connection attempts before giving up.
-const MaxConnectRetries = 5
-
 // ManagedPLC represents a PLC under management.
 type ManagedPLC struct {
-	Config       *config.PLCConfig
-	Driver       driver.Driver        // Unified driver interface
-	DeviceInfo   *driver.DeviceInfo   // Unified device info
-	Programs     []string             // Program names (for Logix)
-	Tags         []driver.TagInfo     // Discovered tags (for discovery-capable PLCs)
-	ManualTags   []driver.TagInfo     // Tags from config (for non-discovery PLCs)
-	ManualTagGen uint64               // Incremented when ManualTags are rebuilt
-	Values       map[string]*TagValue // Tag values from last poll
-	Status       ConnectionStatus
-	LastError    error
-	LastPoll     time.Time
-	ConnRetries  int  // Number of consecutive failed connection attempts
-	RetryLimited bool // True if retry limit reached, stops auto-reconnect
-	mu           sync.RWMutex
+	Config          *config.PLCConfig
+	Driver          driver.Driver        // Unified driver interface
+	DeviceInfo      *driver.DeviceInfo   // Unified device info
+	Programs        []string             // Program names (for Logix)
+	Tags            []driver.TagInfo     // Discovered tags (for discovery-capable PLCs)
+	ManualTags      []driver.TagInfo     // Tags from config (for non-discovery PLCs)
+	ManualTagGen    uint64               // Incremented when ManualTags are rebuilt
+	Values          map[string]*TagValue // Tag values from last poll
+	Status          ConnectionStatus
+	LastError       error
+	LastPoll        time.Time
+	valuesUpdatedAt time.Time
+	mu              sync.RWMutex
 }
 
 // GetStatus returns the current connection status thread-safely.
@@ -185,13 +181,20 @@ func (m *ManagedPLC) GetHealthStatus() HealthStatus {
 
 // GetValues returns a copy of the current tag values.
 func (m *ManagedPLC) GetValues() map[string]*TagValue {
+	values, _ := m.GetValuesSnapshot()
+	return values
+}
+
+// GetValuesSnapshot returns the current tag values and the time they were last
+// updated under the same lock, so cache consumers can report accurate freshness.
+func (m *ManagedPLC) GetValuesSnapshot() (map[string]*TagValue, time.Time) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	result := make(map[string]*TagValue, len(m.Values))
 	for k, v := range m.Values {
 		result[k] = v
 	}
-	return result
+	return result, m.valuesUpdatedAt
 }
 
 // GetTags returns the appropriate tags based on PLC family.
@@ -785,7 +788,9 @@ func (w *PLCWorker) poll() {
 			}
 		}
 	}
-	plc.LastPoll = time.Now()
+	pollTime := time.Now()
+	plc.LastPoll = pollTime
+	plc.valuesUpdatedAt = pollTime
 	plc.mu.Unlock()
 
 	w.statsMu.Lock()
@@ -1316,21 +1321,13 @@ func (m *Manager) connectPLC(plc *ManagedPLC) error {
 
 	// Connect via driver
 	if err := drv.Connect(); err != nil {
+		// Connect may fail after allocating transport resources. Always close the
+		// unsuccessful driver before the watchdog tries again.
+		_ = drv.Close()
 		plc.mu.Lock()
-		plc.ConnRetries++
-		retryCount := plc.ConnRetries
-		if plc.ConnRetries >= MaxConnectRetries {
-			plc.RetryLimited = true
-			plc.Status = StatusDisconnected
-			plc.LastError = fmt.Errorf("retry limit reached (%d attempts): %w", MaxConnectRetries, err)
-			logging.DebugLog("plcman", "CONNECT %s: FAILED - retry limit reached (%d/%d): %v",
-				plcName, retryCount, MaxConnectRetries, err)
-		} else {
-			plc.Status = StatusError
-			plc.LastError = err
-			logging.DebugLog("plcman", "CONNECT %s: FAILED attempt %d/%d: %v",
-				plcName, retryCount, MaxConnectRetries, err)
-		}
+		plc.Status = StatusError
+		plc.LastError = err
+		logging.DebugLog("plcman", "CONNECT %s: FAILED: %v", plcName, err)
 		name := plc.Config.Name
 		lastErr := plc.LastError
 		plc.mu.Unlock()
@@ -1394,8 +1391,6 @@ func (m *Manager) connectPLC(plc *ManagedPLC) error {
 	plc.Programs = programs
 	plc.Tags = tags
 	plc.Status = StatusConnected
-	plc.ConnRetries = 0
-	plc.RetryLimited = false
 	// Seed LastPoll so the watchdog's staleness check grants a grace period
 	// before the first successful poll; staleness then means "no good read
 	// since we connected".
@@ -1422,12 +1417,6 @@ func (m *Manager) Connect(name string) error {
 	if !exists {
 		return fmt.Errorf("PLC not found: %s", name)
 	}
-
-	// Reset retry state for manual connection attempts
-	plc.mu.Lock()
-	plc.ConnRetries = 0
-	plc.RetryLimited = false
-	plc.mu.Unlock()
 
 	// Run connection in a separate goroutine to not block UI
 	go m.connectPLC(plc)
@@ -1802,12 +1791,6 @@ func (m *Manager) checkReconnections() {
 				m.reconnectingMu.Unlock()
 			}()
 
-			// Reset retry state before attempting reconnection
-			p.mu.Lock()
-			p.ConnRetries = 0
-			p.RetryLimited = false
-			p.mu.Unlock()
-
 			m.connectPLC(p)
 		}(plc, name)
 	}
@@ -1855,12 +1838,6 @@ func (m *Manager) scheduleReconnect(name string) {
 		delete(m.reconnecting, name)
 		m.reconnectingMu.Unlock()
 	}()
-
-	// Reset retry state and attempt reconnection
-	plc.mu.Lock()
-	plc.ConnRetries = 0
-	plc.RetryLimited = false
-	plc.mu.Unlock()
 
 	logging.DebugLog("plcman", "RECONNECT %s: attempting reconnection", name)
 	m.connectPLC(plc)
